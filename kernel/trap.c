@@ -77,8 +77,24 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+    // give up the CPU if this is a timer interrupt.
+  if(which_dev == 2) {
+    if (p->alarm_interval != 0) {
+      p->ticks_count++;
+      // 如果到达间隔，且当前没有在执行 handler
+      if (p->ticks_count == p->alarm_interval && p->is_alarming == 0) {
+        // 1. 保存当前现场
+        memmove(p->alarm_trapframe, p->trapframe, sizeof(struct trapframe));
+        // 2. 将返回用户态的地址改为 handler 的地址
+        p->trapframe->epc = (uint64)p->alarm_handler;
+        // 3. 标记正在执行，防止嵌套重入
+        p->is_alarming = 1;
+        // 4. 计数器归零
+        p->ticks_count = 0;
+      }
+    }
     yield();
+  }
 
   usertrapret();
 }
