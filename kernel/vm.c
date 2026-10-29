@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -45,6 +47,40 @@ kvminit()
   // map the trampoline for trap entry/exit to
   // the highest virtual address in the kernel.
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+}
+
+// 和 kvmmap 类似，但作用于指定的页表
+void
+uvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if(mappages(pagetable, va, sz, pa, perm) != 0)
+    panic("uvmmap");
+}
+
+// 为进程创建一个内核页表
+pagetable_t
+proc_kpt_init(void)
+{
+  pagetable_t kernelpt = uvmcreate();
+  if (kernelpt == 0)
+    return 0;
+
+  // 设备寄存器映射
+  uvmmap(kernelpt, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  uvmmap(kernelpt, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  uvmmap(kernelpt, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  uvmmap(kernelpt, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  // 内核代码段（可读可执行）
+  uvmmap(kernelpt, KERNBASE, KERNBASE, (uint64)etext - KERNBASE, PTE_R | PTE_X);
+
+  // 内核数据段和物理内存（可读可写）
+  uvmmap(kernelpt, (uint64)etext, (uint64)etext, PHYSTOP - (uint64)etext, PTE_R | PTE_W);
+
+  // 蹦床页
+  uvmmap(kernelpt, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+  return kernelpt;
 }
 
 // Switch h/w page table register to the kernel's page table,
@@ -132,7 +168,7 @@ kvmpa(uint64 va)
   pte_t *pte;
   uint64 pa;
   
-  pte = walk(kernel_pagetable, va, 0);
+  pte = walk(myproc()->kernelpt, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)
@@ -289,6 +325,37 @@ freewalk(pagetable_t pagetable)
   kfree((void*)pagetable);
 }
 
+// 递归打印页表，level 表示当前深度（1 开始）
+void
+_vmprint(pagetable_t pagetable, int level)
+{
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    if (pte & PTE_V) {
+      // 打印缩进
+      for (int j = 0; j < level; j++) {
+        if (j) printf(" ");
+        printf("..");
+      }
+      uint64 child = PTE2PA(pte);
+      printf("%d: pte %p pa %p\n", i, pte, child);
+
+      // 如果 R/W/X 全为 0，说明是中间页表，递归
+      if ((pte & (PTE_R|PTE_W|PTE_X)) == 0) {
+        _vmprint((pagetable_t)child, level + 1);
+      }
+    }
+  }
+}
+
+// 对外的 vmprint
+void
+vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  _vmprint(pagetable, 1);
+}
+
 // Free user memory pages,
 // then free page-table pages.
 void
@@ -379,23 +446,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
-
-  while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
-
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  return copyin_new(pagetable, dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -405,38 +456,36 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
-  int got_null = 0;
+  return copyinstr_new(pagetable, dst, srcva, max);
+}
 
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > max)
-      n = max;
+// 把用户页表 pagetable 中 [oldsz, newsz) 范围的映射复制到内核页表 kernelpt
+void
+u2kvmcopy(pagetable_t pagetable, pagetable_t kernelpt, uint64 oldsz, uint64 newsz)
+{
+  pte_t *pte_from, *pte_to;
+  uint64 a, pa;
+  uint flags;
 
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      if(*p == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
+  if (oldsz >= newsz)
+    return;
 
-    srcva = va0 + PGSIZE;
-  }
-  if(got_null){
-    return 0;
-  } else {
-    return -1;
+  oldsz = PGROUNDUP(oldsz);
+
+  for (a = oldsz; a < newsz; a += PGSIZE) {
+    // 从用户页表取 PTE
+    if ((pte_from = walk(pagetable, a, 0)) == 0)
+      panic("u2kvmcopy: src pte does not exist");
+    if ((*pte_from & PTE_V) == 0)
+      continue;
+
+    // 在内核页表里找到/分配对应的 PTE
+    if ((pte_to = walk(kernelpt, a, 1)) == 0)
+      panic("u2kvmcopy: pte walk failed");
+
+    pa = PTE2PA(*pte_from);
+    // 内核态不能访问 PTE_U 的页面，所以去掉 PTE_U
+    flags = (PTE_FLAGS(*pte_from)) & (~PTE_U);
+    *pte_to = PA2PTE(pa) | flags;
   }
 }

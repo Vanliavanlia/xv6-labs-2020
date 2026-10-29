@@ -30,16 +30,6 @@ procinit(void)
   initlock(&pid_lock, "nextpid");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
-
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
   }
   kvminithart();
 }
@@ -121,6 +111,22 @@ found:
     return 0;
   }
 
+  // 创建进程的内核页表
+  p->kernelpt = proc_kpt_init();
+  if(p->kernelpt == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // 为进程分配内核栈，并映射到它的内核页表
+  char *pa = kalloc();
+  if(pa == 0)
+    panic("kalloc");
+  uint64 va = KSTACK((int)(p - proc));
+  uvmmap(p->kernelpt, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -128,6 +134,24 @@ found:
   p->context.sp = p->kstack + PGSIZE;
 
   return p;
+}
+
+// 释放内核页表：只释放页表页，不释放叶子物理页
+void
+proc_freekernelpt(pagetable_t kernelpt)
+{
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = kernelpt[i];
+    if (pte & PTE_V) {
+      kernelpt[i] = 0;
+      // 如果不是叶子（没有 R/W/X 权限位），递归释放下一级页表
+      if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+        uint64 child = PTE2PA(pte);
+        proc_freekernelpt((pagetable_t)child);
+      }
+    }
+  }
+  kfree((void*)kernelpt);
 }
 
 // free a proc structure and the data hanging from it,
@@ -139,9 +163,27 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+
+  // 释放内核栈的物理页
+  if (p->kstack) {
+    pte_t *pte = walk(p->kernelpt, p->kstack, 0);
+    if (pte == 0)
+      panic("freeproc: walk");
+    kfree((void*)PTE2PA(*pte));
+    *pte = 0;
+    p->kstack = 0;
+  }
+
+  // 释放进程的内核页表
+  if (p->kernelpt) {
+    proc_freekernelpt(p->kernelpt);
+    p->kernelpt = 0;
+  }
+
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -221,6 +263,8 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  u2kvmcopy(p->pagetable, p->kernelpt, 0, p->sz);
+
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -243,11 +287,19 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    // 加 PLIC 限制：不能让用户空间超过 PLIC 的虚拟地址
+    if (PGROUNDUP(sz + n) >= PLIC) {
+      return -1;
+    }
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    // 把新增的用户映射复制到内核页表
+    u2kvmcopy(p->pagetable, p->kernelpt, sz - n, sz);
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    // 注意：这里不需要 u2kvmcopy，因为内核页表里多余的映射可以保留
+    // （用户进程也访问不到它，只是浪费一点虚拟地址空间）
   }
   p->sz = sz;
   return 0;
@@ -274,6 +326,9 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+
+  // 把子进程的用户映射复制到它的内核页表
+  u2kvmcopy(np->pagetable, np->kernelpt, 0, np->sz);
 
   np->parent = p;
 
@@ -473,7 +528,16 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // 切换到进程的内核页表
+        w_satp(MAKE_SATP(p->kernelpt));
+        sfence_vma();
+
         swtch(&c->context, &p->context);
+
+        // 切回全局内核页表
+        w_satp(MAKE_SATP(kernel_pagetable));
+        sfence_vma();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.

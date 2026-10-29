@@ -1,0 +1,21 @@
+[0;1;32m●[0m ssh.service - OpenBSD Secure Shell server
+     Loaded: loaded (]8;;file://vanlia-VMware-Virtual-Platform/usr/lib/systemd/system/ssh.service\/usr/lib/systemd/system/ssh.service]8;;\; [0;1;32menabled[0m; preset: [0;1;32menabled[0m)
+     Active: [0;1;32mactive (running)[0m since Thu 2026-10-29 14:02:20 CST; 9min ago
+ Invocation: cac47004869a4b6fb5ba07deea025bd1
+TriggeredBy: [0;1;32m●[0m ssh.socket
+       Docs: ]8;;man:sshd(8)\man:sshd(8)]8;;\
+             ]8;;man:sshd_config(5)\man:sshd_config(5)]8;;\
+    Process: 1671 ExecStartPre=/usr/sbin/sshd -t (code=exited, status=0/SUCCESS)
+   Main PID: 1692 (sshd)
+      Tasks: 1[0;38:5:245m (limit: 6092)[0m
+     Memory: 5.8M (peak: 7.8M)
+        CPU: 39ms
+     CGroup: /system.slice/ssh.service
+             └─[0;38:5:245m1692 "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups"[0m
+
+Oct 29 14:02:19 vanlia-VMware-Virtual-Platform systemd[1]: Starting ssh.service - OpenBSD Secure Shell server...
+Oct 29 14:02:20 vanlia-VMware-Virtual-Platform sshd[1692]: Server listening on 0.0.0.0 port 22.
+Oct 29 14:02:20 vanlia-VMware-Virtual-Platform systemd[1]: Started ssh.service - OpenBSD Secure Shell server.
+Oct 29 14:02:20 vanlia-VMware-Virtual-Platform sshd[1692]: Server listening on :: port 22.
+Oct 29 14:05:22 vanlia-VMware-Virtual-Platform sshd-session[4726]: Accepted password for vanlia from 192.168.6.1 port 49805 ssh2
+Oct 29 14:05:22 vanlia-VMware-Virtual-Platform sshd-session[4726]: pam_unix(sshd:session): session opened for user vanlia(uid=1000) by vanlia(uid=0)

@@ -116,6 +116,12 @@ exec(char *path, char **argv)
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
 
+  // 把用户空间的映射复制到内核页表
+  u2kvmcopy(p->pagetable, p->kernelpt, 0, p->sz);
+
+  if(p->pid == 1)
+    vmprint(p->pagetable);
+
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
