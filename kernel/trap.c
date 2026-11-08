@@ -37,37 +37,50 @@ void
 usertrap(void)
 {
   int which_dev = 0;
+  uint64 cause = r_scause();  // <--- 加上变量
 
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
-  // send interrupts and exceptions to kerneltrap(),
-  // since we're now in the kernel.
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
   
-  // save user program counter.
   p->trapframe->epc = r_sepc();
   
-  if(r_scause() == 8){
+  if(cause == 8){
     // system call
-
     if(p->killed)
       exit(-1);
 
-    // sepc points to the ecall instruction,
-    // but we want to return to the next instruction.
     p->trapframe->epc += 4;
 
-    // an interrupt will change sstatus &c registers,
-    // so don't enable until done with those registers.
     intr_on();
-
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(cause == 12 || cause == 13 || cause == 15) {
+    // 处理 Page Fault
+    uint64 fault_va = r_stval(); 
+    
+    // 检查地址是否在合法范围内
+    if (fault_va >= p->sz || fault_va < PGROUNDUP(p->trapframe->sp) - PGSIZE) {
+        p->killed = 1; // 不合法，直接杀死进程
+    } else {
+        // 地址合法，分配物理页
+        char *pa = kalloc();
+        if (pa == 0) {
+            p->killed = 1;
+        } else {
+            memset(pa, 0, PGSIZE);
+            if (mappages(p->pagetable, PGROUNDDOWN(fault_va), PGSIZE, (uint64)pa, PTE_W|PTE_R|PTE_U) != 0) {
+                kfree(pa);
+                p->killed = 1;
+            }
+        }
+    }
   } else {
+    // 其他的未知异常
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
