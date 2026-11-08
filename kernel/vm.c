@@ -311,7 +311,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -320,19 +319,23 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+    
+    // 如果父进程的页面是可写的，改为只读并打上 COW 标记
+    if(flags & PTE_W) {
+      flags = (flags & ~PTE_W) | PTE_COW;
+      *pte = PA2PTE(pa) | flags; // 更新父进程页表
     }
+    
+    // 子进程直接映射到同一个物理页，权限相同
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
+      uvmunmap(new, 0, i / PGSIZE, 1);
+      return -1;
+    }
+    
+    // 增加物理页的引用计数
+    krefinc(pa);
   }
   return 0;
-
- err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
-  return -1;
 }
 
 // mark a PTE invalid for user access.
@@ -355,12 +358,50 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+
+    if (va0 >= MAXVA) {
+        return -1;
+    }
+    
+    // 1. 先尝试 walk 获取 PTE
+    pte = walk(pagetable, va0, 0);
+    
+    // 2. 如果 PTE 不存在或者无效，直接返回错误，绝对不能解引用
+    if(pte == 0 || (*pte & PTE_V) == 0) {
+      return -1;
+    }
+      
+    // 3. 如果是 COW 页面，手动触发复制
+    if(*pte & PTE_COW) {
+      uint64 pa = PTE2PA(*pte);
+      if (krefget(pa) == 1) {
+        *pte = (*pte & ~PTE_COW) | PTE_W;
+      } else {
+        char *mem = kalloc();
+        if(mem == 0) return -1;
+        memmove(mem, (char*)pa, PGSIZE);
+        uint flags = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+        
+        // 必须在 mappages 之前清除旧的 PTE 有效位
+        *pte = 0; 
+        
+        if (mappages(pagetable, va0, PGSIZE, (uint64)mem, flags) != 0) {
+          kfree(mem);
+          return -1;
+        }
+        kfree((void*)pa);
+      }
+    }
+    
+    // 4. 然后再去获取物理地址
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+      
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;

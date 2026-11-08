@@ -37,6 +37,7 @@ void
 usertrap(void)
 {
   int which_dev = 0;
+  uint64 cause = r_scause();
 
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
@@ -67,6 +68,51 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+
+    } else if(cause == 13 || cause == 15) {
+    uint64 fault_va = r_stval(); 
+    
+    // 检查是否越界
+    if (fault_va >= p->sz) {
+        p->killed = 1; 
+    } else {
+        // 查找出错的 PTE
+        pte_t *pte = walk(p->pagetable, fault_va, 0);
+        if (pte == 0 || (*pte & PTE_V) == 0) {
+            p->killed = 1;
+        } else if ((*pte & PTE_COW) == 0) {
+            // 不是 COW 页面，说明是非法操作
+            p->killed = 1;
+        } else {
+            // 是 COW 页面，进行复制
+            uint64 pa = PTE2PA(*pte);
+            // 如果引用计数为1，说明只有自己用，直接把权限改回可写即可，不用复制
+            if (krefget(pa) == 1) {
+                *pte = (*pte & ~PTE_COW) | PTE_W;
+            } else {
+                                // 分配新页面并复制
+                char *mem = kalloc();
+                if (mem == 0) {
+                    p->killed = 1;
+                } else {
+                    memmove(mem, (char*)pa, PGSIZE);
+                    // 建立新映射，可读可写，去掉 COW 标记
+                    uint flags = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+                    
+                    // 👇 加上这一行！先把旧的 PTE 清零，防止 remap panic
+                    *pte = 0; 
+                    
+                    if (mappages(p->pagetable, PGROUNDDOWN(fault_va), PGSIZE, (uint64)mem, flags) != 0) {
+                        kfree(mem);
+                        p->killed = 1;
+                    } else {
+                        // 旧页面引用计数减1
+                        kfree((void*)pa);
+                    }
+                }
+            }
+        }
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

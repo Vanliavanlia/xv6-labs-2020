@@ -339,6 +339,8 @@ sfence_vma()
 
 #define PTE_FLAGS(pte) ((pte) & 0x3FF)
 
+#define PTE_COW (1L << 8) // 使用第 8 位作为 COW 标志
+
 // extract the three 9-bit page table indices from a virtual address.
 #define PXMASK          0x1FF // 9 bits
 #define PXSHIFT(level)  (PGSHIFT+(9*(level)))
