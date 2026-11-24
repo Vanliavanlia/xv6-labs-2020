@@ -400,6 +400,35 @@ bmap(struct inode *ip, uint bn)
     brelse(bp);
     return addr;
   }
+  bn -= NINDIRECT;
+
+  if(bn < NDINDIRECT){
+      // 1. 读取（或分配）二级间接块
+      if((addr = ip->addrs[NDIRECT+1]) == 0)
+        ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+      bp = bread(ip->dev, addr);
+      a = (uint*)bp->data;
+      
+      // 2. 找到对应的那一级间接块
+      uint idx1 = bn / NINDIRECT;
+      uint idx2 = bn % NINDIRECT;
+      
+      if((addr = a[idx1]) == 0){
+        a[idx1] = addr = balloc(ip->dev);
+        log_write(bp); // 分配了新块，记得写日志
+      }
+      brelse(bp);
+      
+      // 3. 读取一级间接块，找到最终的数据块
+      bp = bread(ip->dev, addr);
+      a = (uint*)bp->data;
+      if((addr = a[idx2]) == 0){
+        a[idx2] = addr = balloc(ip->dev);
+        log_write(bp);
+      }
+      brelse(bp);
+      return addr;
+    }
 
   panic("bmap: out of range");
 }
@@ -430,6 +459,27 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+   if(ip->addrs[NDIRECT+1]){
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    for(int i = 0; i < NINDIRECT; i++){
+      if(a[i]) {
+        // a[i] 指向的是一个一级间接块，读取它并释放里面的数据块
+        struct buf *bp2 = bread(ip->dev, a[i]);
+        uint *a2 = (uint*)bp2->data;
+        for(int j = 0; j < NINDIRECT; j++){
+          if(a2[j])
+            bfree(ip->dev, a2[j]);
+        }
+        brelse(bp2);
+        bfree(ip->dev, a[i]); // 释放这个一级间接块
+      }
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]); // 释放二级间接块本身
+    ip->addrs[NDIRECT+1] = 0;
   }
 
   ip->size = 0;

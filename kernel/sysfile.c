@@ -322,6 +322,33 @@ sys_open(void)
     return -1;
   }
 
+  // 处理软链接
+  if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)) {
+    int depth = 0;
+    char target[MAXPATH];
+    while(ip->type == T_SYMLINK) {
+      if(depth >= 10) { // 防止无限循环（比如 a->b, b->a）
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      // 读取软链接文件里保存的目标路径
+      if(readi(ip, 0, (uint64)target, 0, MAXPATH) != MAXPATH) {
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      iunlockput(ip);
+      // 查找下一个 inode
+      if((ip = namei(target)) == 0) {
+        end_op();
+        return -1;
+      }
+      ilock(ip);
+      depth++;
+    }
+  }
+
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
@@ -484,3 +511,30 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  // 创建一个新文件，类型为 T_SYMLINK
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+  // 把目标路径写入这个文件的数据块中
+  if(writei(ip, 0, (uint64)target, 0, MAXPATH) != MAXPATH){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  iunlockput(ip);
+  end_op();
+  return 0;
+}
+
