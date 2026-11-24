@@ -484,3 +484,88 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr, length, offset;
+  int prot, flags, fd;
+  struct file *f;
+
+  if(argaddr(0, &addr) < 0 || argaddr(1, &length) < 0 || argint(2, &prot) < 0
+     || argint(3, &flags) < 0 || argfd(4, &fd, &f) < 0 || argaddr(5, &offset) < 0)
+    return -1;
+
+  // 实验简化：不支持显式指定 addr
+  if(addr != 0) return -1;
+
+  struct proc *p = myproc();
+  
+  // 寻找空闲的 VMA 槽位
+  for(int i = 0; i < NVMA; i++){
+    if(!p->vmas[i].used){
+      // 如果是 MAP_SHARED 且要求写，但文件不可写，就报错
+      if((flags == MAP_SHARED) && (prot & PROT_WRITE) && !f->writable){
+        return -1;
+      }
+      
+      p->vmas[i].used = 1;
+      p->vmas[i].addr = p->sz; // 分配在进程地址空间的末尾
+      p->vmas[i].length = length;
+      p->vmas[i].prot = prot;
+      p->vmas[i].flags = flags;
+      p->vmas[i].f = f;
+      p->vmas[i].offset = offset;
+      
+      filedup(f); // 增加文件引用计数
+      p->sz += length; // 增加进程大小，但不实际分配物理页
+      
+      return p->vmas[i].addr;
+    }
+  }
+  return -1;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr, length;
+  if(argaddr(0, &addr) < 0 || argaddr(1, &length) < 0)
+    return -1;
+
+  struct proc *p = myproc();
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      // 地址落在该 VMA 的范围内
+      if(addr >= p->vmas[i].addr && addr < p->vmas[i].addr + p->vmas[i].length){
+        
+        // 如果是 MAP_SHARED 且可写，写回文件
+        if((p->vmas[i].flags == MAP_SHARED) && (p->vmas[i].prot & PROT_WRITE)){
+          filewrite(p->vmas[i].f, addr, length);
+        }
+        
+        // 取消页表映射
+        uvmunmap(p->pagetable, addr, length / PGSIZE, 1);
+        
+        // 👇 核心修改：如果解绑的是整个 VMA，才销毁记录
+        if(p->vmas[i].addr == addr && length == p->vmas[i].length) {
+          p->vmas[i].used = 0;
+          fileclose(p->vmas[i].f);
+        } 
+        // 否则，如果是从头解绑了一部分，更新起始地址和长度
+        else if (p->vmas[i].addr == addr) {
+          p->vmas[i].addr += length;
+          p->vmas[i].length -= length;
+        } 
+        // 如果是从尾部解绑了一部分，只更新长度
+        else if (addr + length == p->vmas[i].addr + p->vmas[i].length) {
+          p->vmas[i].length -= length;
+        }
+        
+        return 0; // 成功解绑
+      }
+    }
+  }
+  
+  return -1; // 非法地址或长度，返回 -1
+}

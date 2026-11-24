@@ -1,4 +1,11 @@
-// Saved registers for kernel context switches.
+#ifndef PROC_H
+#define PROC_H
+
+#include "param.h"
+#include "types.h"
+#include "spinlock.h"
+#include "riscv.h"
+
 struct context {
   uint64 ra;
   uint64 sp;
@@ -18,29 +25,18 @@ struct context {
   uint64 s11;
 };
 
-// Per-CPU state.
 struct cpu {
-  struct proc *proc;          // The process running on this cpu, or null.
-  struct context context;     // swtch() here to enter scheduler().
-  int noff;                   // Depth of push_off() nesting.
+  struct proc *proc;          // The currently-running process.
+  struct context context;     // swtch() here to run process
+  int noff;                   // Depth of push_off()
   int intena;                 // Were interrupts enabled before push_off()?
 };
 
 extern struct cpu cpus[NCPU];
 
-// per-process data for the trap handling code in trampoline.S.
-// sits in a page by itself just under the trampoline page in the
-// user page table. not specially mapped in the kernel page table.
-// the sscratch register points here.
-// uservec in trampoline.S saves user registers in the trapframe,
-// then initializes registers from the trapframe's
-// kernel_sp, kernel_hartid, kernel_satp, and jumps to kernel_trap.
-// usertrapret() and userret in trampoline.S set up
-// the trapframe's kernel_*, restore user registers from the
-// trapframe, switch to the user page table, and enter user space.
-// the trapframe includes callee-saved user registers like s0-s11 because the
-// return-to-user path via usertrapret() doesn't return through
-// the entire kernel call stack.
+enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+
+// trapframe 结构体
 struct trapframe {
   /*   0 */ uint64 kernel_satp;   // kernel page table
   /*   8 */ uint64 kernel_sp;     // top of process's kernel stack
@@ -80,13 +76,22 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
-enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+// VMA 结构体
+#define NVMA 16
+struct vma {
+  int used;
+  uint64 addr;
+  uint64 length;
+  int prot;
+  int flags;
+  struct file *f;
+  uint64 offset;
+};
 
-// Per-process state
+// 进程结构体
 struct proc {
   struct spinlock lock;
 
-  // p->lock must be held when using these:
   enum procstate state;        // Process state
   struct proc *parent;         // Parent process
   void *chan;                  // If non-zero, sleeping on chan
@@ -94,7 +99,6 @@ struct proc {
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
 
-  // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
   uint64 sz;                   // Size of process memory (bytes)
   pagetable_t pagetable;       // User page table
@@ -103,4 +107,8 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  struct vma vmas[NVMA];       // 新增的 VMA 数组
 };
+
+#endif

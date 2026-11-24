@@ -113,6 +113,8 @@ allocproc(void)
 
 found:
   p->pid = allocpid();
+  
+  memset(&p->vmas, 0, sizeof(p->vmas));
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -281,6 +283,14 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+
+  // 新增：复制父进程的 VMA 数组，并把对应文件的引用计数 +1
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      memmove(&np->vmas[i], &p->vmas[i], sizeof(p->vmas[i]));
+      filedup(p->vmas[i].f);
+    }
+  }
 
   np->parent = p;
 

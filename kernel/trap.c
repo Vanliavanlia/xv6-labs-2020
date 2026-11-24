@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"       
+#include "sleeplock.h" 
+#include "file.h"     
+#include "fcntl.h"  
 
 struct spinlock tickslock;
 uint ticks;
@@ -52,7 +56,6 @@ usertrap(void)
   
   if(r_scause() == 8){
     // system call
-
     if(p->killed)
       exit(-1);
 
@@ -67,7 +70,41 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15) {
+    // 👇 新增：处理 mmap 缺页异常
+    uint64 fault_va = r_stval(); 
+    
+    int handled = 0;
+    for(int i = 0; i < NVMA; i++){
+      if(p->vmas[i].used && fault_va >= p->vmas[i].addr && fault_va < p->vmas[i].addr + p->vmas[i].length) {
+        // 分配物理页
+        char *pa = kalloc();
+        if(pa == 0) { p->killed = 1; break; }
+        memset(pa, 0, PGSIZE);
+        
+        // 从文件中读取数据到该页
+        uint64 offset = p->vmas[i].offset + (PGROUNDDOWN(fault_va) - p->vmas[i].addr);
+        ilock(p->vmas[i].f->ip);
+        readi(p->vmas[i].f->ip, 0, (uint64)pa, offset, PGSIZE);
+        iunlock(p->vmas[i].f->ip);
+        
+        // 建立映射，权限为 U | R | W
+        int perm = PTE_U | PTE_R;
+        if(p->vmas[i].prot & PROT_WRITE) perm |= PTE_W;
+        
+        if(mappages(p->pagetable, PGROUNDDOWN(fault_va), PGSIZE, (uint64)pa, perm) != 0) {
+          kfree(pa);
+          p->killed = 1;
+        }
+        handled = 1;
+        break;
+      }
+    }
+    if(!handled) {
+      p->killed = 1; // 如果不是 mmap 的地址，直接杀掉进程
+    }
   } else {
+    // 其他未知异常
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
